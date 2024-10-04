@@ -13,6 +13,8 @@ import threading
 from sonic_py_common import daemon_base, device_info, logger
 from swsscommon import swsscommon
 
+from scripts.pcied_utilities.pcied_table_helper import PciedDetachTableHelper
+
 #
 # Constants ====================================================================
 #
@@ -151,6 +153,32 @@ class DaemonPcied(daemon_base.DaemonBase):
 
         self.status_table.set("status", fvs)
 
+    # Check if any interface is in detaching mode by querying the state_db
+    def is_device_in_detaching_mode(self, pcie_dev):
+        try:
+            # Iterate over all ASIC tables in the helper
+            for asic_id, detach_info_table in self.pcied_table_helper.get_pcied_detach_info_table().items():
+                # Use getKeys to retrieve all keys in the table
+                keys = detach_info_table.getKeys()
+                for key in keys:
+                    status, fields, _ = detach_info_table.get(key)
+                    if not status:
+                        continue
+
+                    # Convert fields to a dictionary
+                    field_dict = dict(fields)
+                    device = field_dict.get("bus_info")
+                    device_state = field_dict.get("dpu_state")
+
+                    # Check if the device matches and is in "detaching" mode
+                    if device == pcie_dev and device_state == "detaching":
+                        return True
+        except Exception as e:
+            self.log_error(f"Error checking detaching status for {pcie_dev}: {e}")
+
+        return False
+
+
     # Check the PCIe devices
     def check_pcie_devices(self):
         self.resultInfo = platform_pcieutil.get_pcie_check()
@@ -160,6 +188,14 @@ class DaemonPcied(daemon_base.DaemonBase):
 
         for result in self.resultInfo:
             if result["result"] == "Failed":
+                # Convert bus, device, and function to a bus_info format like "0000:03:00.0"
+                pcie_dev = "0000:{int(result['bus'], 16):02x}:{int(result['dev'], 16):02x}.{int(result['fn'], 16)}"
+
+                # Check if the device is in detaching mode
+                if self.is_device_in_detaching_mode(pcie_dev):
+                    self.log_info("PCIe Device: {pcie_dev} is in detaching mode, skipping warning.")
+                    continue
+
                 self.log_warning("PCIe Device: " + result["name"] + " Not Found")
                 err += 1
             else:

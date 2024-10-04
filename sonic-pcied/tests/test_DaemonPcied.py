@@ -2,6 +2,7 @@ import datetime
 import os
 import sys
 from imp import load_source  # Replace with importlib once we no longer need to support Python 2
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,6 +33,7 @@ scripts_path = os.path.join(modules_path, "scripts")
 sys.path.insert(0, modules_path)
 load_source('pcied', os.path.join(scripts_path, 'pcied'))
 import pcied
+from scripts.pcied_utilities.pcied_table_helper import PciedDetachTableHelper
 
 pcie_no_aer_stats = \
 """
@@ -143,8 +145,48 @@ class TestDaemonPcied(object):
         daemon_pcied.run()
         assert daemon_pcied.check_pcie_devices.call_count == 1
 
+    @mock.patch('scripts.pcied_utilities.pcied_table_helper.PciedDetachTableHelper')
+    def test_is_device_in_detaching_mode(self, MockPciedDetachTableHelper):
+        # Create a mock instance of PciedDetachTableHelper
+        mock_helper = MockPciedDetachTableHelper.return_value
+
+        # Mock return value for get_pcied_detach_info_table to simulate multiple DPU entries
+        mock_helper.get_pcied_detach_info_table.return_value = {
+            0: MagicMock(getKeys=lambda: ["PCIE_DETACH_INFO|DPU_0", "PCIE_DETACH_INFO|DPU_1"]),
+            1: MagicMock(getKeys=lambda: ["PCIE_DETACH_INFO|DPU_2"])
+        }
+
+        # Simulate the get() method for each key
+        mock_helper.get_pcied_detach_info_table.return_value[0].get = lambda key: (
+            (True, [("bus_info", "0000:03:00.0"), ("dpu_state", "detaching")], 0) if key == "PCIE_DETACH_INFO|DPU_0" else
+            (True, [("bus_info", "0000:04:00.0"), ("dpu_state", "detaching")], 0) if key == "PCIE_DETACH_INFO|DPU_1" else
+            (False, [], 0)
+        )
+
+        mock_helper.get_pcied_detach_info_table.return_value[1].get = lambda key: (
+            (True, [("bus_info", "0000:05:00.0"), ("dpu_state", "attached")], 0) if key == "PCIE_DETACH_INFO|DPU_2" else
+            (False, [], 0)
+        )
+
+        # Instantiate DaemonPcied and inject the mock helper
+        daemon_pcied = pcied.DaemonPcied(SYSLOG_IDENTIFIER)
+        daemon_pcied.log_error = mock.MagicMock()  # Mock log_error method
+        daemon_pcied.pcied_table_helper = mock_helper
+
+        # Test for a device that is in detaching mode
+        self.assertTrue(daemon_pcied.is_device_in_detaching_mode("0000:03:00.0"))
+        self.assertTrue(daemon_pcied.is_device_in_detaching_mode("0000:04:00.0"))
+
+        # Test for a device that is not in detaching mode
+        self.assertFalse(daemon_pcied.is_device_in_detaching_mode("0000:05:00.0"))
+
+        # Test for a device that does not exist in the table
+        self.assertFalse(daemon_pcied.is_device_in_detaching_mode("0000:06:00.0"))
+
+
     @mock.patch('pcied.load_platform_pcieutil', mock.MagicMock())
-    def test_check_pcie_devices(self):
+    @mock.patch.object(pcied.DaemonPcied, 'is_device_in_detaching_mode', return_value=False)
+    def test_check_pcie_devices(self, mock_is_device_in_detaching_mode):
         daemon_pcied = pcied.DaemonPcied(SYSLOG_IDENTIFIER)
         daemon_pcied.update_pcie_devices_status_db = mock.MagicMock()
         daemon_pcied.check_n_update_pcie_aer_stats = mock.MagicMock()
@@ -154,6 +196,11 @@ class TestDaemonPcied(object):
         assert daemon_pcied.update_pcie_devices_status_db.call_count == 1
         assert daemon_pcied.check_n_update_pcie_aer_stats.call_count == 0
 
+        # Test case when device is in detaching mode
+        mock_is_device_in_detaching_mode.return_value = True
+        daemon_pcied.log_info = mock.MagicMock()
+        daemon_pcied.check_pcie_devices()
+        assert daemon_pcied.log_info.call_count == 1
 
     @mock.patch('pcied.load_platform_pcieutil', mock.MagicMock())
     def test_update_pcie_devices_status_db(self):
@@ -210,5 +257,5 @@ class TestDaemonPcied(object):
              ])
         """
 
-        daemon_pcied.update_aer_to_statedb() 
+        daemon_pcied.update_aer_to_statedb()
         assert daemon_pcied.log_debug.call_count == 0
