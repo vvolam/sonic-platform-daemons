@@ -143,6 +143,41 @@ class TestDaemonPsud(object):
         expected_calls = [mock.call("Failed to update PSU data - Test message")] * 2
         assert daemon_psud.log_warning.mock_calls == expected_calls
 
+        daemon_psud._update_single_psu_data.reset_mock()
+        daemon_psud.log_warning.reset_mock()
+
+        # Test _update_single_psu_data() throws TypeError (platform API returns None where int expected)
+        # This simulates the crash scenario: "TypeError: int() argument must be a string, not 'NoneType'"
+        daemon_psud._update_single_psu_data.side_effect = TypeError("int() argument must be a string, a bytes-like object or a real number, not 'NoneType'")
+        daemon_psud.update_psu_data()
+        assert daemon_psud._update_single_psu_data.call_count == 2
+        assert daemon_psud.log_warning.call_count == 2
+        # Verify TypeError is caught and logged as warning, not crash
+        assert "int() argument must be a string" in daemon_psud.log_warning.mock_calls[0][1][0]
+
+    def test_try_get_handles_type_error(self):
+        """Test that try_get catches TypeError from platform APIs returning invalid types"""
+        # Test normal operation
+        callback = mock.MagicMock(return_value=42)
+        result = psud.try_get(callback, default='N/A')
+        assert result == 42
+
+        # Test returns default when callback returns None
+        callback = mock.MagicMock(return_value=None)
+        result = psud.try_get(callback, default='N/A')
+        assert result == 'N/A'
+
+        # Test returns default on NotImplementedError
+        callback = mock.MagicMock(side_effect=NotImplementedError())
+        result = psud.try_get(callback, default='N/A')
+        assert result == 'N/A'
+
+        # Test returns default on TypeError (new fix for crash scenario)
+        # This simulates platform API that internally does int(None) and raises TypeError
+        callback = mock.MagicMock(side_effect=TypeError("int() argument must be a string"))
+        result = psud.try_get(callback, default='N/A')
+        assert result == 'N/A'
+
     def _construct_expected_fvp(self, power=100.0, power_warning_suppress_threshold='N/A', power_critical_threshold='N/A', power_overload=False):
         expected_fvp = psud.swsscommon.FieldValuePairs(
             [(psud.PSU_INFO_MODEL_FIELD, 'Fake Model'),
@@ -322,6 +357,15 @@ class TestDaemonPsud(object):
         assert not daemon_psud.psu_status_dict[1].power_exceeded_threshold
         psu.get_psu_power_warning_suppress_threshold = mock.MagicMock(side_effect=NotImplementedError(''))
         daemon_psud._update_single_psu_data(1, psu)
+        assert not daemon_psud.psu_status_dict[1].check_psu_power_threshold
+        assert not daemon_psud.psu_status_dict[1].power_exceeded_threshold
+
+        # Power returns None causing TypeError in threshold calculation
+        psu.get_psu_power_warning_suppress_threshold = mock.MagicMock(return_value=100.0)
+        daemon_psud.psu_status_dict[1].check_psu_power_threshold = True
+        psu.get_power = mock.MagicMock(return_value=None)
+        daemon_psud._update_single_psu_data(1, psu)
+        # TypeError should be caught, threshold check disabled, daemon should not crash
         assert not daemon_psud.psu_status_dict[1].check_psu_power_threshold
         assert not daemon_psud.psu_status_dict[1].power_exceeded_threshold
 
